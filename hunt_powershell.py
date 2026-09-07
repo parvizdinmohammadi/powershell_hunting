@@ -1,308 +1,299 @@
-# -*- coding: utf-8 -*-
-"""
-ابزار شناسایی فعالیت‌های مشکوک PowerShell در لاگ‌ها
-با قابلیت خروجی Excel
-معادل کوئری KQL در KC7
-"""
-
 import json
-import os
+import pandas as pd
+import re
 from datetime import datetime
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+import os
 
-# ============ بخش تنظیمات ============
-INPUT_FILE_PATH = r"C:\Users\Lenovo\Desktop\powershell_hunting\data\logs.json"
-OUTPUT_FILE_PATH = r"C:\Users\Lenovo\Desktop\powershell_hunting\output\suspicious_logs.json"
-EXCEL_FILE_PATH = r"C:\Users\Lenovo\Desktop\powershell_hunting\output\suspicious_logs.xlsx"
-
-START_TIME = "2026-09-01 08:00:00"
-END_TIME = "2026-09-01 12:00:00"
-
-SUSPICIOUS_KEYWORDS = [
-    "downloadstring",
-    "invoke-expression",
-    "downloadfile",
-    "webclient",
-    "iex",
-    "invoke-webrequest"
-]
-# =====================================
-
-
-# ============ تابع 1: بارگذاری لاگ‌ها ============
-def load_logs(file_path):
-    """
-    لاگ‌ها را از فایل JSON بارگذاری می‌کند.
-    """
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"❌ فایل {file_path} پیدا نشد!")
+class PowerShellHunting:
+    def __init__(self, json_file_path, output_dir="output", start_date=None, end_date=None):
+        self.json_file_path = json_file_path
+        self.output_dir = output_dir
+        self.start_date = start_date
+        self.end_date = end_date
+        self.suspicious_keywords = [
+            "downloadstring", "invoke-expression", "downloadfile", 
+            "webclient", "iex", "invoke-webrequest", "frombase64string", 
+            "eval", "exec", "wget", "curl"
+        ]
+        self.logs = []
+        self.suspicious_logs = []
+        self.create_output_dir()
     
-    with open(file_path, 'r', encoding='utf-8') as file:
-        logs = json.load(file)
+    def create_output_dir(self):
+        if not os.path.exists(self.output_dir):
+            os.makedirs(self.output_dir)
     
-    print(f"✅ تعداد {len(logs)} لاگ از فایل {file_path} بارگذاری شد.")
-    return logs
-
-
-# ============ تابع 2: فیلتر کردن لاگ‌ها ============
-def filter_suspicious_powershell(logs, start_time, end_time, keywords):
-    """
-    لاگ‌های مشکوک PowerShell را پیدا می‌کند.
-    """
-    start_dt = datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
-    end_dt = datetime.strptime(end_time, "%Y-%m-%d %H:%M:%S")
+    def load_logs(self):
+        try:
+            with open(self.json_file_path, 'r', encoding='utf-8-sig') as f:
+                self.logs = json.load(f)
+            print(f"✅ تعداد {len(self.logs)} لاگ از فایل {self.json_file_path} بارگذاری شد.")
+            return True
+        except FileNotFoundError:
+            print(f"❌ فایل {self.json_file_path} پیدا نشد!")
+            return False
+        except json.JSONDecodeError as e:
+            print(f"❌ خطا در فرمت JSON: {e}")
+            return False
     
-    suspicious_logs = []
+    def extract_field_from_properties(self, log, index, default="N/A"):
+        """استخراج مقدار از Properties با هندل کردن خطا"""
+        try:
+            if 'Properties' in log and isinstance(log['Properties'], list):
+                if index < len(log['Properties']):
+                    prop = log['Properties'][index]
+                    if isinstance(prop, dict) and 'Value' in prop:
+                        return prop['Value']
+            return default
+        except:
+            return default
     
-    for log in logs:
-        # شرط 1: بازه زمانی
-        log_dt = datetime.strptime(log["Timestamp"], "%Y-%m-%d %H:%M:%S")
-        if not (start_dt <= log_dt <= end_dt):
-            continue
+    def extract_time(self, log):
+        """استخراج زمان از لاگ"""
+        try:
+            # بررسی TimeCreated
+            if 'TimeCreated' in log:
+                if isinstance(log['TimeCreated'], dict):
+                    return log['TimeCreated'].get('SystemTime', '')
+                elif isinstance(log['TimeCreated'], str):
+                    return log['TimeCreated']
+            
+            # بررسی مستقیم زمان
+            if 'Time' in log:
+                return log['Time']
+            
+            # بررسی در Properties
+            if 'Properties' in log and isinstance(log['Properties'], list):
+                for prop in log['Properties']:
+                    if isinstance(prop, dict) and 'Value' in prop:
+                        val = str(prop['Value'])
+                        # الگوی زمان ISO
+                        if re.match(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}', val):
+                            return val
+            return ''
+        except:
+            return ''
+    
+    def extract_command(self, log):
+        """استخراج دستور PowerShell از لاگ"""
+        try:
+            # جستجو در کل لاگ به صورت رشته
+            log_str = json.dumps(log, ensure_ascii=False).lower()
+            if 'powershell' not in log_str:
+                return None
+            
+            # جستجو در Properties
+            if 'Properties' in log and isinstance(log['Properties'], list):
+                for prop in log['Properties']:
+                    if isinstance(prop, dict) and 'Value' in prop:
+                        val = str(prop['Value'])
+                        if 'powershell' in val.lower():
+                            return val
+            
+            # جستجو در Message
+            if 'Message' in log:
+                val = log['Message']
+                if 'powershell' in val.lower():
+                    return val
+            
+            return None
+        except:
+            return None
+    
+    def extract_computer_name(self, log):
+        """استخراج نام کامپیوتر"""
+        try:
+            if 'ComputerName' in log:
+                return log['ComputerName']
+            if 'MachineName' in log:
+                return log['MachineName']
+            if 'Provider' in log and isinstance(log['Provider'], dict):
+                return log['Provider'].get('Name', 'N/A')
+            return 'N/A'
+        except:
+            return 'N/A'
+    
+    def extract_user(self, log):
+        """استخراج نام کاربر"""
+        try:
+            # بررسی مستقیم
+            if 'User' in log:
+                return log['User']
+            if 'UserId' in log:
+                return log['UserId']
+            
+            # بررسی در Properties (TargetUserName معمولاً در index 5 است)
+            user = self.extract_field_from_properties(log, 5, None)
+            if user and user != 'N/A':
+                return user
+            
+            return 'N/A'
+        except:
+            return 'N/A'
+    
+    def extract_ip(self, text):
+        """استخراج آی‌پی از متن"""
+        if not text:
+            return None
+        ip_pattern = r'\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b'
+        ips = re.findall(ip_pattern, text)
+        return ips[0] if ips else None
+    
+    def extract_event_id(self, log):
+        """استخراج Event ID"""
+        try:
+            if 'Id' in log:
+                return log['Id']
+            if 'EventID' in log:
+                return log['EventID']
+            return 'N/A'
+        except:
+            return 'N/A'
+    
+    def is_within_time_range(self, time_str):
+        if not self.start_date or not self.end_date or not time_str:
+            return True
         
-        # شرط 2: نام فایل شامل powershell باشد
-        if "powershell" not in log["FileName"].lower():
-            continue
-        
-        # شرط 3: دستور شامل کلمات کلیدی باشد
-        command_lower = log["ProcessCommandLine"].lower()
-        if not any(keyword in command_lower for keyword in keywords):
-            continue
-        
-        suspicious_logs.append(log)
+        try:
+            # پاکسازی زمان
+            time_str = time_str.replace('Z', '')
+            if 'T' in time_str:
+                event_time = datetime.fromisoformat(time_str)
+            else:
+                event_time = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
+            
+            start = datetime.strptime(self.start_date, "%Y-%m-%d %H:%M:%S")
+            end = datetime.strptime(self.end_date, "%Y-%m-%d %H:%M:%S")
+            return start <= event_time <= end
+        except:
+            return True
     
-    # مرتب‌سازی بر اساس زمان (جدیدترین اول)
-    suspicious_logs.sort(key=lambda x: x["Timestamp"], reverse=True)
+    def analyze_powershell_command(self, command):
+        if not command:
+            return False, []
+        
+        command_lower = command.lower()
+        found_keywords = []
+        
+        for keyword in self.suspicious_keywords:
+            if keyword in command_lower:
+                found_keywords.append(keyword)
+        
+        # بررسی الگوهای Base64
+        base64_pattern = r'[A-Za-z0-9+/]{20,}={0,2}'
+        if re.search(base64_pattern, command):
+            found_keywords.append("base64_encoded")
+        
+        # بررسی الگوهای Download
+        download_pattern = r'http[s]?://[^\s"\']+'
+        if re.search(download_pattern, command):
+            found_keywords.append("url_download")
+        
+        return len(found_keywords) > 0, found_keywords
     
-    print(f"🔍 تعداد {len(suspicious_logs)} لاگ مشکوک پیدا شد.")
-    return suspicious_logs
+    def hunt(self):
+        print("🔍 در حال تحلیل لاگ‌ها...")
+        
+        for log in self.logs:
+            # استخراج زمان
+            time_created = self.extract_time(log)
+            
+            # بررسی بازه زمانی
+            if not self.is_within_time_range(time_created):
+                continue
+            
+            # استخراج دستور
+            command = self.extract_command(log)
+            if not command:
+                continue
+            
+            # تحلیل دستور
+            is_suspicious, keywords = self.analyze_powershell_command(command)
+            
+            if is_suspicious:
+                ip = self.extract_ip(command)
+                user = self.extract_user(log)
+                device = self.extract_computer_name(log)
+                event_id = self.extract_event_id(log)
+                
+                self.suspicious_logs.append({
+                    'time': time_created,
+                    'device': device,
+                    'user': user,
+                    'command': command[:500] + "..." if len(command) > 500 else command,
+                    'ip': ip if ip else 'N/A',
+                    'keywords': ', '.join(keywords),
+                    'event_id': event_id
+                })
+        
+        print(f"🔍 تعداد {len(self.suspicious_logs)} لاگ مشکوک پیدا شد.")
+        return self.suspicious_logs
+    
+    def save_results(self):
+        if not self.suspicious_logs:
+            print("⚠️ هیچ لاگ مشکوکی پیدا نشد.")
+        
+        # ذخیره JSON
+        json_output = os.path.join(self.output_dir, "suspicious_logs.json")
+        with open(json_output, 'w', encoding='utf-8-sig') as f:
+            json.dump(self.suspicious_logs, f, indent=2, ensure_ascii=False)
+        print(f"💾 نتایج در فایل JSON: {json_output} ذخیره شد.")
+        
+        # ذخیره Excel
+        if self.suspicious_logs:
+            df = pd.DataFrame(self.suspicious_logs)
+            excel_output = os.path.join(self.output_dir, "suspicious_logs.xlsx")
+            df.to_excel(excel_output, index=False, engine='openpyxl')
+            print(f"📊 نتایج در فایل Excel: {excel_output} ذخیره شد.")
+        else:
+            print("⚠️ فایل Excel ایجاد نشد.")
+    
+    def print_summary(self):
+        print("\n" + "="*80)
+        print("🚨 فعالیت‌های مشکوک PowerShell پیدا شد:")
+        print("="*80)
+        
+        if not self.suspicious_logs:
+            print("✅ هیچ فعالیت مشکوکی پیدا نشد.")
+            return
+        
+        for idx, log in enumerate(self.suspicious_logs, 1):
+            print(f"\n📌 نتیجه #{idx}")
+            print(f"   ⏰ زمان: {log['time']}")
+            print(f"   💻 دستگاه: {log['device']}")
+            print(f"   👤 کاربر: {log['user']}")
+            print(f"   🏷️ Event ID: {log['event_id']}")
+            print(f"   📝 دستور: {log['command']}")
+            if log['ip'] != 'N/A':
+                print(f"   🌐 IP خارجی: {log['ip']}")
+            print(f"   🔑 کلمات کلیدی: {log['keywords']}")
+            print("   " + "-"*70)
 
 
-# ============ تابع 3: نمایش نتایج در ترمینال ============
-def display_results(logs):
-    """
-    نتایج را در ترمینال نمایش می‌دهد.
-    """
-    print("\n" + "=" * 80)
-    print("🚨 فعالیت‌های مشکوک PowerShell پیدا شد:")
-    print("=" * 80)
+def main():
+    json_file = "Data\\windows_logs.json"
     
-    if not logs:
-        print("❌ هیچ لاگ مشکوکی پیدا نشد.")
+    if not os.path.exists(json_file):
+        print(f"❌ فایل {json_file} وجود ندارد!")
+        print("💡 ابتدا اسکریپت extract_logs.ps1 را اجرا کنید.")
         return
     
-    counter = 1
-    for log in logs:
-        print(f"\n📌 نتیجه #{counter}")
-        print(f"   ⏰ زمان: {log['Timestamp']}")
-        print(f"   💻 دستگاه: {log['DeviceName']}")
-        print(f"   👤 کاربر: {log['AccountName']}")
-        
-        command = log['ProcessCommandLine']
-        if len(command) > 100:
-            command = command[:100] + "..."
-        print(f"   📝 دستور: {command}")
-        
-        print(f"   🌐 IP خارجی: {log['RemoteIP']}")
-        print("   " + "-" * 70)
-        counter += 1
-
-
-# ============ تابع 4: ذخیره نتایج در JSON ============
-def save_results_json(logs, file_path):
-    """
-    نتایج را در فایل JSON ذخیره می‌کند.
-    """
-    output_dir = os.path.dirname(file_path)
-    if output_dir and not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-    
-    with open(file_path, 'w', encoding='utf-8') as file:
-        json.dump(logs, file, indent=2, ensure_ascii=False)
-    
-    print(f"💾 نتایج در فایل JSON: {file_path} ذخیره شد.")
-
-
-# ============ تابع 5: ذخیره نتایج در Excel (نسخه اصلاح شده) ============
-def save_results_excel(logs, file_path):
-    """
-    نتایج را در فایل Excel با قالب‌بندی زیبا ذخیره می‌کند.
-    """
-    # ایجاد کتاب کار جدید
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "PowerShell Hunting Results"
-    
-    # ===== تعریف استایل‌ها =====
-    # فونت عنوان (Header)
-    header_font = Font(name='B Nazanin', size=12, bold=True, color="FFFFFF")
-    header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
-    header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    
-    # فونت داده‌ها
-    data_font = Font(name='B Nazanin', size=10)
-    data_alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
-    
-    # حاشیه
-    thin_border = Border(
-        left=Side(style='thin'),
-        right=Side(style='thin'),
-        top=Side(style='thin'),
-        bottom=Side(style='thin')
+    hunter = PowerShellHunting(
+        json_file_path=json_file,
+        output_dir="output"
     )
     
-    # ===== نوشتن عنوان ستون‌ها =====
-    headers = ["ردیف", "زمان", "دستگاه", "کاربر", "دستور کامل", "فرایند والد", "IP خارجی", "وضعیت"]
-    for col, header in enumerate(headers, 1):
-        cell = ws.cell(row=1, column=col, value=header)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = header_alignment
-        cell.border = thin_border
+    if not hunter.load_logs():
+        return
     
-    # ===== نوشتن داده‌ها =====
-    for row_idx, log in enumerate(logs, 2):
-        # ستون 1: ردیف
-        cell = ws.cell(row=row_idx, column=1, value=row_idx - 1)
-        cell.font = data_font
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-        cell.border = thin_border
-        
-        # ستون 2: زمان
-        cell = ws.cell(row=row_idx, column=2, value=log['Timestamp'])
-        cell.font = data_font
-        cell.alignment = data_alignment
-        cell.border = thin_border
-        
-        # ستون 3: دستگاه
-        cell = ws.cell(row=row_idx, column=3, value=log['DeviceName'])
-        cell.font = data_font
-        cell.alignment = data_alignment
-        cell.border = thin_border
-        
-        # ستون 4: کاربر
-        cell = ws.cell(row=row_idx, column=4, value=log['AccountName'])
-        cell.font = data_font
-        cell.alignment = data_alignment
-        cell.border = thin_border
-        
-        # ستون 5: دستور کامل
-        cell = ws.cell(row=row_idx, column=5, value=log['ProcessCommandLine'])
-        cell.font = data_font
-        cell.alignment = data_alignment
-        cell.border = thin_border
-        
-        # ستون 6: فرایند والد
-        cell = ws.cell(row=row_idx, column=6, value=log.get('InitiatingProcessCommandLine', 'نامشخص'))
-        cell.font = data_font
-        cell.alignment = data_alignment
-        cell.border = thin_border
-        
-        # ستون 7: IP خارجی
-        cell = ws.cell(row=row_idx, column=7, value=log['RemoteIP'])
-        cell.font = data_font
-        cell.alignment = data_alignment
-        cell.border = thin_border
-        
-        # ستون 8: وضعیت (بر اساس IP)
-        if log['RemoteIP'] != "-":
-            status = "⚠️ مشکوک (IP خارجی)"
-            fill = PatternFill(start_color="FFC000", end_color="FFC000", fill_type="solid")
-        else:
-            status = "✅ نیاز به بررسی بیشتر"
-            fill = PatternFill(start_color="92D050", end_color="92D050", fill_type="solid")
-        
-        cell = ws.cell(row=row_idx, column=8, value=status)
-        cell.font = data_font
-        cell.alignment = Alignment(horizontal="center", vertical="center")
-        cell.fill = fill
-        cell.border = thin_border
+    hunter.hunt()
+    hunter.save_results()
+    hunter.print_summary()
     
-    # ===== تنظیم عرض ستون‌ها =====
-    ws.column_dimensions['A'].width = 8   # ردیف
-    ws.column_dimensions['B'].width = 22  # زمان
-    ws.column_dimensions['C'].width = 18  # دستگاه
-    ws.column_dimensions['D'].width = 18  # کاربر
-    ws.column_dimensions['E'].width = 80  # دستور کامل
-    ws.column_dimensions['F'].width = 40  # فرایند والد
-    ws.column_dimensions['G'].width = 18  # IP خارجی
-    ws.column_dimensions['H'].width = 25  # وضعیت
-    
-    # ===== تنظیم ارتفاع ردیف‌ها =====
-    ws.row_dimensions[1].height = 30  # ارتفاع سطر عنوان
-    
-    # ===== اضافه کردن فیلتر =====
-    ws.auto_filter.ref = ws.dimensions
-    
-    # ===== اضافه کردن هدر و فوتر (نسخه اصلاح شده) =====
-    try:
-        # در نسخه‌های جدید openpyxl، فوتر به این شکل تنظیم می‌شود
-        ws.header_footer.center_footer.text = "تولید شده توسط ابزار شناسایی PowerShell"
-        ws.header_footer.right_footer.text = "Page &P"
-    except AttributeError:
-        # اگر نسخه قدیمی است، این روش را امتحان کن
-        try:
-            ws.footer.center.text = "تولید شده توسط ابزار شناسایی PowerShell"
-            ws.footer.right.text = "Page &P"
-        except:
-            pass  # اگر هیچکدام کار نکرد، نادیده بگیر
-    
-    # ===== ذخیره فایل =====
-    output_dir = os.path.dirname(file_path)
-    if output_dir and not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-    
-    wb.save(file_path)
-    print(f"📊 نتایج در فایل Excel: {file_path} ذخیره شد.")
+    print("\n" + "="*50)
+    print("✅ عملیات با موفقیت به پایان رسید!")
+    print("="*50)
 
 
-# ============ تابع اصلی ============
-def main():
-    """
-    تابع اصلی که همه چیز را اجرا می‌کند.
-    """
-    print("🛡️  ابزار شناسایی PowerShell مخرب")
-    print("=" * 50)
-    print(f"📂 فایل ورودی: {INPUT_FILE_PATH}")
-    print(f"📂 فایل خروجی JSON: {OUTPUT_FILE_PATH}")
-    print(f"📊 فایل خروجی Excel: {EXCEL_FILE_PATH}")
-    print(f"⏰ بازه زمانی: {START_TIME} تا {END_TIME}")
-    print(f"🔑 کلمات کلیدی: {', '.join(SUSPICIOUS_KEYWORDS)}")
-    print("=" * 50 + "\n")
-    
-    try:
-        # مرحله 1: بارگذاری لاگ‌ها
-        logs = load_logs(INPUT_FILE_PATH)
-        
-        # مرحله 2: فیلتر کردن لاگ‌های مشکوک
-        suspicious = filter_suspicious_powershell(logs, START_TIME, END_TIME, SUSPICIOUS_KEYWORDS)
-        
-        # مرحله 3: نمایش نتایج در ترمینال
-        display_results(suspicious)
-        
-        # مرحله 4: ذخیره نتایج در JSON
-        save_results_json(suspicious, OUTPUT_FILE_PATH)
-        
-        # مرحله 5: ذخیره نتایج در Excel
-        save_results_excel(suspicious, EXCEL_FILE_PATH)
-        
-        print("\n" + "=" * 50)
-        print("✅ عملیات با موفقیت به پایان رسید!")
-        print(f"📊 فایل Excel را در مسیر زیر باز کنید:")
-        print(f"   {EXCEL_FILE_PATH}")
-        print("=" * 50)
-        
-    except FileNotFoundError as e:
-        print(f"\n❌ خطا: {e}")
-    except json.JSONDecodeError as e:
-        print(f"\n❌ خطا در فرمت JSON: {e}")
-    except KeyError as e:
-        print(f"\n❌ خطا: کلید {e} در لاگ‌ها وجود ندارد.")
-    except Exception as e:
-        print(f"\n❌ خطا: {e}")
-
-
-# ============================================================
 if __name__ == "__main__":
     main()
